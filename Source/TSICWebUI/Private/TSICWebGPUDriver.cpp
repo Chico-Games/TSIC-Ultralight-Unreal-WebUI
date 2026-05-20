@@ -52,108 +52,84 @@ uint32_t FWebGPUDriver::NextGeometryId()     { return NextGeoId++; }
 
 void FWebGPUDriver::CreateTexture(uint32_t texture_id, ultralight::RefPtr<ultralight::Bitmap> bitmap)
 {
-	FGPUTextureEntry Entry;
-	Entry.Width  = bitmap->width();
-	Entry.Height = bitmap->height();
-	Entry.bIsRenderTarget = bitmap->IsEmpty();
+	FResourceWork W;
+	W.Kind  = EResourceWorkKind::CreateTexture;
+	W.Id    = texture_id;
+	W.Width = bitmap->width();
+	W.Height = bitmap->height();
+	W.bIsRenderTarget = bitmap->IsEmpty();
 
-	EPixelFormat Format = PF_B8G8R8A8;
+	W.PixelFormat = PF_B8G8R8A8;
 	if (!bitmap->IsEmpty() && bitmap->format() == ultralight::BitmapFormat::A8_UNORM)
 	{
-		Format = PF_A8;
+		W.PixelFormat = PF_A8;
 	}
 
-	ETextureCreateFlags Flags = ETextureCreateFlags::ShaderResource;
-	if (Entry.bIsRenderTarget)
+	W.TexFlags = ETextureCreateFlags::ShaderResource;
+	if (W.bIsRenderTarget)
 	{
-		Flags |= ETextureCreateFlags::RenderTargetable;
+		W.TexFlags |= ETextureCreateFlags::RenderTargetable;
 	}
 
-	const uint32 TexWidth  = Entry.Width;
-	const uint32 TexHeight = Entry.Height;
-
-	FRHITextureCreateDesc Desc =
-		FRHITextureCreateDesc::Create2D(TEXT("TSICWebUITexture"), TexWidth, TexHeight, Format)
-		.SetFlags(Flags)
-		.SetNumMips(1);
-
-	TArray<uint8> PixelData;
-	uint32 RowBytes = 0;
 	if (!bitmap->IsEmpty())
 	{
-		RowBytes = bitmap->row_bytes();
-		PixelData.SetNumUninitialized(RowBytes * TexHeight);
+		W.RowBytes = bitmap->row_bytes();
+		W.PixelData.SetNumUninitialized(W.RowBytes * W.Height);
 		void* Pixels = bitmap->LockPixels();
 		if (Pixels)
 		{
-			FMemory::Memcpy(PixelData.GetData(), Pixels, RowBytes * TexHeight);
+			FMemory::Memcpy(W.PixelData.GetData(), Pixels, W.RowBytes * W.Height);
 		}
 		bitmap->UnlockPixels();
 	}
 
-	// Create the RHI texture synchronously on the game thread so the FTextureRHIRef
-	// is valid immediately. This is allowed in 5.6 via FRHICommandListImmediate.
-	// Avoids the FlushRenderingCommands stall that previously serialised every
-	// CreateTexture call.
-	FRHICommandListImmediate& RHICmdList = FRHICommandListExecutor::GetImmediateCommandList();
-	Entry.TextureRHI = RHICmdList.CreateTexture(Desc);
-	if (PixelData.Num() > 0 && Entry.TextureRHI.IsValid())
-	{
-		FUpdateTextureRegion2D Region(0, 0, 0, 0, TexWidth, TexHeight);
-		RHIUpdateTexture2D(Entry.TextureRHI, 0, Region, RowBytes, PixelData.GetData());
-	}
-
-	Textures.Add(texture_id, MoveTemp(Entry));
 	static int32 LogCount = 0;
 	if (++LogCount <= 8 || (LogCount % 50) == 0)
 	{
 		UE_LOG(LogTSICWebUI, Log, TEXT("[gpu] CreateTexture id=%u %ux%u RT=%d (#%d)"),
-			texture_id, TexWidth, TexHeight, Entry.bIsRenderTarget ? 1 : 0, LogCount);
+			texture_id, W.Width, W.Height, W.bIsRenderTarget ? 1 : 0, LogCount);
 	}
+
+	FScopeLock Lock(&WorkLock);
+	PendingWork.Add(MoveTemp(W));
 }
 
 void FWebGPUDriver::UpdateTexture(uint32_t texture_id, ultralight::RefPtr<ultralight::Bitmap> bitmap)
 {
-	FGPUTextureEntry* Entry = Textures.Find(texture_id);
-	if (!Entry || !Entry->TextureRHI.IsValid() || bitmap->IsEmpty())
+	if (bitmap->IsEmpty())
 	{
 		return;
 	}
 
-	const uint32 TexWidth  = bitmap->width();
-	const uint32 TexHeight = bitmap->height();
-	const uint32 RowBytes  = bitmap->row_bytes();
+	FResourceWork W;
+	W.Kind   = EResourceWorkKind::UpdateTexture;
+	W.Id     = texture_id;
+	W.Width  = bitmap->width();
+	W.Height = bitmap->height();
+	W.RowBytes = bitmap->row_bytes();
 
-	TArray<uint8> PixelData;
-	PixelData.SetNumUninitialized(RowBytes * TexHeight);
+	W.PixelData.SetNumUninitialized(W.RowBytes * W.Height);
 	void* Pixels = bitmap->LockPixels();
 	if (Pixels)
 	{
-		FMemory::Memcpy(PixelData.GetData(), Pixels, RowBytes * TexHeight);
+		FMemory::Memcpy(W.PixelData.GetData(), Pixels, W.RowBytes * W.Height);
 	}
 	bitmap->UnlockPixels();
 
-	FTextureRHIRef TextureRHI = Entry->TextureRHI;
-	ENQUEUE_RENDER_COMMAND(TSICWebGPUUpdateTexture)(
-		[TextureRHI, PixelData = MoveTemp(PixelData), TexWidth, TexHeight, RowBytes]
-		(FRHICommandListImmediate&)
-		{
-			FUpdateTextureRegion2D Region(0, 0, 0, 0, TexWidth, TexHeight);
-			RHIUpdateTexture2D(TextureRHI, 0, Region, RowBytes, PixelData.GetData());
-		});
+	FScopeLock Lock(&WorkLock);
+	PendingWork.Add(MoveTemp(W));
 }
 
 void FWebGPUDriver::DestroyTexture(uint32_t texture_id)
 {
-	if (const FGPUTextureEntry* Entry = Textures.Find(texture_id))
-	{
-		if (Entry->bIsExternal)
-		{
-			// Externally-owned (e.g., game UTexture2D). Removal happens via UnregisterExternalTexture.
-			return;
-		}
-	}
-	Textures.Remove(texture_id);
+	// Defer the internal/external decision to ApplyResourceWork — it owns the
+	// Textures map and knows bIsExternal. External destroys are no-ops there;
+	// the only real removal happens via UnregisterExternalTexture.
+	FResourceWork W;
+	W.Kind = EResourceWorkKind::DestroyTexture;
+	W.Id   = texture_id;
+	FScopeLock Lock(&WorkLock);
+	PendingWork.Add(MoveTemp(W));
 }
 
 uint32 FWebGPUDriver::RegisterExternalTexture(FTextureRHIRef RHI, uint32 Width, uint32 Height)
@@ -166,110 +142,112 @@ uint32 FWebGPUDriver::RegisterExternalTexture(FTextureRHIRef RHI, uint32 Width, 
 		return 0;
 	}
 
-	FGPUTextureEntry Entry;
-	Entry.TextureRHI = RHI;
-	Entry.Width = Width;
-	Entry.Height = Height;
-	Entry.bIsRenderTarget = false;
-	Entry.bIsExternal = true;
-
 	const uint32 NewId = NextTexId++;
-	Textures.Add(NewId, MoveTemp(Entry));
+
+	// Publish to the game-thread-visible mirror immediately so callers that
+	// look the id up via GetRHITexture before the next ExecuteCommands tick
+	// (e.g., the slate brush wiring) see the texture.
+	{
+		FScopeLock Lock(&ExposedTexLock);
+		ExposedTextures.Add(NewId, RHI);
+	}
+
+	// Send the render-thread-owned Textures map an "insert external" intent so
+	// the draw loop can resolve the id when Ultralight references it. The
+	// ExternalTextureRHI field tells ApplyResourceWork to passthrough instead of
+	// allocating.
+	FResourceWork W;
+	W.Kind   = EResourceWorkKind::CreateTexture;
+	W.Id     = NewId;
+	W.Width  = Width;
+	W.Height = Height;
+	W.bIsRenderTarget    = false;
+	W.TexFlags           = ETextureCreateFlags::ShaderResource;
+	W.ExternalTextureRHI = RHI;
+	{
+		FScopeLock Lock(&WorkLock);
+		PendingWork.Add(MoveTemp(W));
+	}
 	UE_LOG(LogTSICWebUI, Log, TEXT("[gpu] RegisterExternalTexture id=%u %ux%u"), NewId, Width, Height);
 	return NewId;
 }
 
 void FWebGPUDriver::UnregisterExternalTexture(uint32 TextureId)
 {
-	if (const FGPUTextureEntry* Entry = Textures.Find(TextureId))
+	bool bRemovedFromExposed = false;
 	{
-		if (!Entry->bIsExternal)
-		{
-			UE_LOG(LogTSICWebUI, Warning,
-				TEXT("[gpu] UnregisterExternalTexture id=%u skipped: entry is not external"), TextureId);
-			return;
-		}
-		Textures.Remove(TextureId);
-		UE_LOG(LogTSICWebUI, Log, TEXT("[gpu] UnregisterExternalTexture id=%u"), TextureId);
+		FScopeLock Lock(&ExposedTexLock);
+		bRemovedFromExposed = ExposedTextures.Remove(TextureId) > 0;
 	}
+	if (!bRemovedFromExposed)
+	{
+		return;
+	}
+
+	FResourceWork W;
+	W.Kind = EResourceWorkKind::ExternalUnregister;
+	W.Id   = TextureId;
+	{
+		FScopeLock Lock(&WorkLock);
+		PendingWork.Add(MoveTemp(W));
+	}
+	UE_LOG(LogTSICWebUI, Log, TEXT("[gpu] UnregisterExternalTexture id=%u"), TextureId);
 }
 
 void FWebGPUDriver::CreateRenderBuffer(uint32_t render_buffer_id, const ultralight::RenderBuffer& buffer)
 {
-	FGPURenderBufferEntry Entry;
-	Entry.TextureId = buffer.texture_id;
-	Entry.Width  = buffer.width;
-	Entry.Height = buffer.height;
-	RenderBuffers.Add(render_buffer_id, MoveTemp(Entry));
+	FResourceWork W;
+	W.Kind            = EResourceWorkKind::CreateRenderBuffer;
+	W.Id              = render_buffer_id;
+	W.BoundTextureId  = buffer.texture_id;
+	W.Width           = buffer.width;
+	W.Height          = buffer.height;
+	FScopeLock Lock(&WorkLock);
+	PendingWork.Add(MoveTemp(W));
 }
 
 void FWebGPUDriver::DestroyRenderBuffer(uint32_t render_buffer_id)
 {
-	RenderBuffers.Remove(render_buffer_id);
+	FResourceWork W;
+	W.Kind = EResourceWorkKind::DestroyRenderBuffer;
+	W.Id   = render_buffer_id;
+	FScopeLock Lock(&WorkLock);
+	PendingWork.Add(MoveTemp(W));
 }
 
 void FWebGPUDriver::CreateGeometry(uint32_t geometry_id,
 	const ultralight::VertexBuffer& vertices, const ultralight::IndexBuffer& indices)
 {
-	FGPUGeometryEntry Entry;
-	Entry.Format = vertices.format;
-	Entry.VertexBytes = vertices.size;
-	Entry.IndexBytes  = indices.size;
-
-	const uint32 VBSize = vertices.size;
-	const uint32 IBSize = indices.size;
-
-	// Build the buffers synchronously on the immediate command list so the
-	// FBufferRHIRefs stored in Entry are valid before we MoveTemp into the map.
-	// (Deferring this to a render-thread lambda would capture stale pointers.)
-	FRHICommandListImmediate& RHICmdList = FRHICommandListExecutor::GetImmediateCommandList();
-	{
-		const FRHIBufferCreateDesc Desc =
-			FRHIBufferCreateDesc::CreateVertex(TEXT("TSICWebVB"), VBSize)
-			.AddUsage(EBufferUsageFlags::Dynamic)
-			.DetermineInitialState();
-		Entry.VertexBuffer = RHICmdList.CreateBuffer(Desc);
-		if (Entry.VertexBuffer.IsValid())
-		{
-			void* Mapped = RHICmdList.LockBuffer(Entry.VertexBuffer, 0, VBSize, RLM_WriteOnly);
-			FMemory::Memcpy(Mapped, vertices.data, VBSize);
-			RHICmdList.UnlockBuffer(Entry.VertexBuffer);
-		}
-	}
-	{
-		const FRHIBufferCreateDesc Desc =
-			FRHIBufferCreateDesc::CreateIndex<uint32>(TEXT("TSICWebIB"), IBSize / sizeof(uint32))
-			.AddUsage(EBufferUsageFlags::Dynamic)
-			.DetermineInitialState();
-		Entry.IndexBuffer = RHICmdList.CreateBuffer(Desc);
-		if (Entry.IndexBuffer.IsValid())
-		{
-			void* Mapped = RHICmdList.LockBuffer(Entry.IndexBuffer, 0, IBSize, RLM_WriteOnly);
-			FMemory::Memcpy(Mapped, indices.data, IBSize);
-			RHICmdList.UnlockBuffer(Entry.IndexBuffer);
-		}
-	}
-
-	Geometries.Add(geometry_id, MoveTemp(Entry));
+	FResourceWork W;
+	W.Kind         = EResourceWorkKind::CreateGeometry;
+	W.Id           = geometry_id;
+	W.VertexFormat = vertices.format;
+	W.VertexData.Append(static_cast<const uint8*>(vertices.data), vertices.size);
+	W.IndexData .Append(static_cast<const uint8*>(indices.data),  indices.size);
+	FScopeLock Lock(&WorkLock);
+	PendingWork.Add(MoveTemp(W));
 }
 
 void FWebGPUDriver::UpdateGeometry(uint32_t geometry_id,
 	const ultralight::VertexBuffer& vertices, const ultralight::IndexBuffer& indices)
 {
-	FGPUGeometryEntry* Entry = Geometries.Find(geometry_id);
-	if (!Entry)
-	{
-		return;
-	}
-
-	// For simplicity, always recreate. The skeleton isn't issuing draws yet so this is a no-op cost.
-	DestroyGeometry(geometry_id);
-	CreateGeometry(geometry_id, vertices, indices);
+	FResourceWork W;
+	W.Kind         = EResourceWorkKind::UpdateGeometry;
+	W.Id           = geometry_id;
+	W.VertexFormat = vertices.format;
+	W.VertexData.Append(static_cast<const uint8*>(vertices.data), vertices.size);
+	W.IndexData .Append(static_cast<const uint8*>(indices.data),  indices.size);
+	FScopeLock Lock(&WorkLock);
+	PendingWork.Add(MoveTemp(W));
 }
 
 void FWebGPUDriver::DestroyGeometry(uint32_t geometry_id)
 {
-	Geometries.Remove(geometry_id);
+	FResourceWork W;
+	W.Kind = EResourceWorkKind::DestroyGeometry;
+	W.Id   = geometry_id;
+	FScopeLock Lock(&WorkLock);
+	PendingWork.Add(MoveTemp(W));
 }
 
 void FWebGPUDriver::UpdateCommandList(const ultralight::CommandList& list)
@@ -386,15 +364,173 @@ namespace
 	}
 }
 
+void FWebGPUDriver::ApplyResourceWork(FRHICommandListImmediate& RHICmdList, TArray<FResourceWork>& Work)
+{
+	for (FResourceWork& W : Work)
+	{
+		switch (W.Kind)
+		{
+		case EResourceWorkKind::CreateTexture:
+		{
+			FGPUTextureEntry Entry;
+			Entry.Width  = W.Width;
+			Entry.Height = W.Height;
+			Entry.bIsRenderTarget = W.bIsRenderTarget;
+
+			if (W.ExternalTextureRHI.IsValid())
+			{
+				// Externally-owned texture: passthrough, don't allocate.
+				Entry.TextureRHI  = W.ExternalTextureRHI;
+				Entry.bIsExternal = true;
+			}
+			else
+			{
+				FRHITextureCreateDesc Desc =
+					FRHITextureCreateDesc::Create2D(TEXT("TSICWebUITexture"), W.Width, W.Height, W.PixelFormat)
+					.SetFlags(W.TexFlags)
+					.SetNumMips(1);
+				Entry.TextureRHI = RHICmdList.CreateTexture(Desc);
+				if (W.PixelData.Num() > 0 && Entry.TextureRHI.IsValid())
+				{
+					FUpdateTextureRegion2D Region(0, 0, 0, 0, W.Width, W.Height);
+					RHIUpdateTexture2D(Entry.TextureRHI, 0, Region, W.RowBytes, W.PixelData.GetData());
+				}
+			}
+
+			if (Entry.TextureRHI.IsValid())
+			{
+				FScopeLock Lock(&ExposedTexLock);
+				ExposedTextures.Add(W.Id, Entry.TextureRHI);
+			}
+			Textures.Add(W.Id, MoveTemp(Entry));
+			break;
+		}
+
+		case EResourceWorkKind::UpdateTexture:
+		{
+			FGPUTextureEntry* Entry = Textures.Find(W.Id);
+			if (!Entry || !Entry->TextureRHI.IsValid() || W.PixelData.Num() == 0)
+			{
+				break;
+			}
+			FUpdateTextureRegion2D Region(0, 0, 0, 0, W.Width, W.Height);
+			RHIUpdateTexture2D(Entry->TextureRHI, 0, Region, W.RowBytes, W.PixelData.GetData());
+			break;
+		}
+
+		case EResourceWorkKind::DestroyTexture:
+		{
+			// Ultralight-initiated destroy: no-op for external entries (their
+			// lifetime is managed by UnregisterExternalTexture).
+			if (const FGPUTextureEntry* Entry = Textures.Find(W.Id))
+			{
+				if (Entry->bIsExternal)
+				{
+					break;
+				}
+			}
+			Textures.Remove(W.Id);
+			FScopeLock Lock(&ExposedTexLock);
+			ExposedTextures.Remove(W.Id);
+			break;
+		}
+
+		case EResourceWorkKind::ExternalUnregister:
+		{
+			// Unconditional removal — ExposedTextures was already cleared on
+			// the game thread by UnregisterExternalTexture.
+			Textures.Remove(W.Id);
+			break;
+		}
+
+		case EResourceWorkKind::CreateRenderBuffer:
+		{
+			FGPURenderBufferEntry Entry;
+			Entry.TextureId = W.BoundTextureId;
+			Entry.Width  = W.Width;
+			Entry.Height = W.Height;
+			RenderBuffers.Add(W.Id, MoveTemp(Entry));
+			break;
+		}
+
+		case EResourceWorkKind::DestroyRenderBuffer:
+		{
+			RenderBuffers.Remove(W.Id);
+			break;
+		}
+
+		case EResourceWorkKind::CreateGeometry:
+		case EResourceWorkKind::UpdateGeometry:
+		{
+			// UpdateGeometry: drop the previous entry so the new buffers replace
+			// it (matches the original "always recreate" comment in the prior
+			// implementation; the skeleton's draw cost is small).
+			if (W.Kind == EResourceWorkKind::UpdateGeometry)
+			{
+				Geometries.Remove(W.Id);
+			}
+
+			FGPUGeometryEntry Entry;
+			Entry.Format = W.VertexFormat;
+			Entry.VertexBytes = static_cast<uint32>(W.VertexData.Num());
+			Entry.IndexBytes  = static_cast<uint32>(W.IndexData.Num());
+
+			if (Entry.VertexBytes > 0)
+			{
+				const FRHIBufferCreateDesc Desc =
+					FRHIBufferCreateDesc::CreateVertex(TEXT("TSICWebVB"), Entry.VertexBytes)
+					.AddUsage(EBufferUsageFlags::Dynamic)
+					.DetermineInitialState();
+				Entry.VertexBuffer = RHICmdList.CreateBuffer(Desc);
+				if (Entry.VertexBuffer.IsValid())
+				{
+					void* Mapped = RHICmdList.LockBuffer(Entry.VertexBuffer, 0, Entry.VertexBytes, RLM_WriteOnly);
+					FMemory::Memcpy(Mapped, W.VertexData.GetData(), Entry.VertexBytes);
+					RHICmdList.UnlockBuffer(Entry.VertexBuffer);
+				}
+			}
+			if (Entry.IndexBytes > 0)
+			{
+				const FRHIBufferCreateDesc Desc =
+					FRHIBufferCreateDesc::CreateIndex<uint32>(TEXT("TSICWebIB"), Entry.IndexBytes / sizeof(uint32))
+					.AddUsage(EBufferUsageFlags::Dynamic)
+					.DetermineInitialState();
+				Entry.IndexBuffer = RHICmdList.CreateBuffer(Desc);
+				if (Entry.IndexBuffer.IsValid())
+				{
+					void* Mapped = RHICmdList.LockBuffer(Entry.IndexBuffer, 0, Entry.IndexBytes, RLM_WriteOnly);
+					FMemory::Memcpy(Mapped, W.IndexData.GetData(), Entry.IndexBytes);
+					RHICmdList.UnlockBuffer(Entry.IndexBuffer);
+				}
+			}
+			Geometries.Add(W.Id, MoveTemp(Entry));
+			break;
+		}
+
+		case EResourceWorkKind::DestroyGeometry:
+		{
+			Geometries.Remove(W.Id);
+			break;
+		}
+		}
+	}
+}
+
 void FWebGPUDriver::ExecuteCommands()
 {
+	TArray<FResourceWork>       Work;
 	TArray<ultralight::Command> Commands;
+	{
+		FScopeLock Lock(&WorkLock);
+		Work = MoveTemp(PendingWork);
+		PendingWork.Reset();
+	}
 	{
 		FScopeLock Lock(&CommandLock);
 		Commands = MoveTemp(PendingCommands);
 		PendingCommands.Reset();
 	}
-	if (Commands.Num() == 0)
+	if (Work.Num() == 0 && Commands.Num() == 0)
 	{
 		return;
 	}
@@ -402,21 +538,22 @@ void FWebGPUDriver::ExecuteCommands()
 	static int32 BatchCount = 0;
 	if (++BatchCount == 1 || BatchCount == 60 || BatchCount == 300)
 	{
-		UE_LOG(LogTSICWebUI, Log, TEXT("[gpu] ExecuteCommands batch #%d count=%d"),
-			BatchCount, Commands.Num());
+		UE_LOG(LogTSICWebUI, Log, TEXT("[gpu] ExecuteCommands batch #%d work=%d draws=%d"),
+			BatchCount, Work.Num(), Commands.Num());
 	}
 
-	// Snapshot the resource maps so the render-thread lambda can read them.
-	// These TMaps live on the driver instance, which outlives the render-thread
-	// command (we FlushRenderingCommands on destruction).
+	// Pointers to the render-thread-owned maps. The driver instance outlives
+	// any queued render command (we FlushRenderingCommands on destruction).
 	TMap<uint32, FGPUTextureEntry>*       TexMap = &Textures;
 	TMap<uint32, FGPURenderBufferEntry>*  RBMap  = &RenderBuffers;
 	TMap<uint32, FGPUGeometryEntry>*      GeoMap = &Geometries;
 
 	ENQUEUE_RENDER_COMMAND(TSICWebGPUExecute)(
-		[Commands = MoveTemp(Commands), TexMap, RBMap, GeoMap]
-		(FRHICommandListImmediate& RHICmdList)
+		[this, Work = MoveTemp(Work), Commands = MoveTemp(Commands), TexMap, RBMap, GeoMap]
+		(FRHICommandListImmediate& RHICmdList) mutable
 		{
+			ApplyResourceWork(RHICmdList, Work);
+
 			// The render thread's immediate command list is already in the
 			// Graphics pipeline; calling SwitchPipeline(Graphics) here would
 			// double-begin the active breadcrumb (UE 5.6 RHI assertion).
@@ -523,8 +660,9 @@ void FWebGPUDriver::ExecuteCommands()
 
 FTextureRHIRef FWebGPUDriver::GetRHITexture(uint32_t texture_id) const
 {
-	const FGPUTextureEntry* Entry = Textures.Find(texture_id);
-	return Entry ? Entry->TextureRHI : nullptr;
+	FScopeLock Lock(&ExposedTexLock);
+	const FTextureRHIRef* Found = ExposedTextures.Find(texture_id);
+	return Found ? *Found : FTextureRHIRef();
 }
 
 } // namespace TSICWebUI

@@ -36,6 +36,46 @@ namespace TSICWebUI
 		uint32 IndexBytes = 0;
 	};
 
+	enum class EResourceWorkKind : uint8
+	{
+		CreateTexture,
+		UpdateTexture,
+		DestroyTexture,       // honored only for non-external entries
+		ExternalUnregister,   // unconditional removal, raised by UnregisterExternalTexture
+		CreateRenderBuffer,
+		DestroyRenderBuffer,
+		CreateGeometry,
+		UpdateGeometry,
+		DestroyGeometry,
+	};
+
+	struct FResourceWork
+	{
+		EResourceWorkKind Kind;
+		uint32 Id = 0;
+
+		// Texture payload (Create/Update)
+		uint32 Width = 0;
+		uint32 Height = 0;
+		uint32 RowBytes = 0;
+		EPixelFormat PixelFormat = PF_B8G8R8A8;
+		ETextureCreateFlags TexFlags = ETextureCreateFlags::ShaderResource;
+		bool bIsRenderTarget = false;
+		TArray<uint8> PixelData;
+		// External-RHI passthrough for CreateTexture: if set, ApplyResourceWork
+		// inserts this ref into the Textures map (with bIsExternal=true) instead
+		// of allocating a new RHI texture.
+		FTextureRHIRef ExternalTextureRHI;
+
+		// Render buffer payload (Create)
+		uint32 BoundTextureId = 0;
+
+		// Geometry payload (Create/Update)
+		ultralight::VertexBufferFormat VertexFormat = ultralight::VertexBufferFormat::_2f_4ub_2f;
+		TArray<uint8> VertexData;
+		TArray<uint8> IndexData;
+	};
+
 	/**
 	 * Minimal Ultralight GPUDriver implementation built on UE's RHI.
 	 *
@@ -88,13 +128,28 @@ namespace TSICWebUI
 		void UnregisterExternalTexture(uint32 TextureId);
 
 	private:
+		void ApplyResourceWork(FRHICommandListImmediate& RHICmdList, TArray<FResourceWork>& Work);
+
 		uint32 NextTexId = 1;
 		uint32 NextRBId = 1;
 		uint32 NextGeoId = 1;
 
+		// Render-thread-owned. Only mutated inside ApplyResourceWork (and the draw
+		// loop in ExecuteCommands' lambda reads them). The destructor flushes
+		// rendering commands before destroying the driver, so these are safe to
+		// clear on the game thread at that point.
 		TMap<uint32, FGPUTextureEntry> Textures;
 		TMap<uint32, FGPURenderBufferEntry> RenderBuffers;
 		TMap<uint32, FGPUGeometryEntry> Geometries;
+
+		// Game-thread-readable mirror of texture RHI refs. Written under
+		// ExposedTexLock by the render thread (after ApplyResourceWork creates a
+		// texture) and by the game thread (RegisterExternalTexture / Unregister).
+		TMap<uint32, FTextureRHIRef> ExposedTextures;
+		mutable FCriticalSection ExposedTexLock;
+
+		TArray<FResourceWork> PendingWork;
+		FCriticalSection WorkLock;
 
 		TArray<ultralight::Command> PendingCommands;
 		FCriticalSection CommandLock;
