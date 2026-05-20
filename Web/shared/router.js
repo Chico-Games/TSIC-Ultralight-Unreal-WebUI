@@ -2,10 +2,23 @@
 //   <meta name="tsic-screen" content="MainMenu">
 // On UI.Screen.Changed, navigate if the broadcast name differs from this page's.
 //
+// HUD overlays (action-bar, hotbar, health-bar, etc.) listed in OVERLAY_SCREENS
+// are exempt from the redirect — they coexist with the active main screen and
+// must observe UI.Screen.Changed without navigating themselves away.
+//
 // Also reads:
 //   <meta name="tsic-input-mode" content="InputMode.Menu.Map">       (existing)
 //   <meta name="tsic-action-bar-context" content='[ {...}, ... ]'>   (this spec)
 (function () {
+  // HUD overlay screens never redirect on Screen.Changed — they're meant to
+  // sit on top of whichever main screen is active and react to the broadcast
+  // (e.g. action-bar swaps between gameplay/menu group, hotbar follows the
+  // selected slot). A redirect here breaks the overlay entirely.
+  const OVERLAY_SCREENS = new Set([
+    'ActionBar', 'Hotbar', 'HealthBar', 'StaminaBar', 'Stomach',
+    'Crosshair', 'Detection', 'CircularProgress', 'Notifications',
+    'PlayerIndicators', 'Ping', 'PingMarkers',
+  ]);
   const SCREEN_TO_FILE = {
     MainMenu: 'main-menu',
     NewStore: 'new-store',
@@ -121,6 +134,8 @@
     window.tsic.on('tsic.msg.UI.Screen.Changed', (payload /*, meta, name*/) => {
       if (!payload || !payload.Name) return;
       if (payload.Name === myScreen()) return;
+      // Overlays observe Screen.Changed but never navigate themselves.
+      if (OVERLAY_SCREENS.has(myScreen())) return;
       const file = fileFor(payload.Name);
       if (!file) {
         console.warn('[router] no file mapping for screen', payload.Name);

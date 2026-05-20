@@ -157,6 +157,19 @@ void UTSICWebUISubsystem::Deinitialize()
 
 	EventBus.Reset();
 
+#if WITH_EDITOR
+	// Purge WebCore's in-memory resource cache when PIE ends. The renderer is
+	// module-owned and survives PIE end/start, which means WebCore's 64 MiB
+	// memory cache (parsed HTML/CSS/JS keyed by URL) survives too — the next
+	// PIE session would otherwise serve the previous run's cached resources
+	// for the same file:// URLs without ever calling our FileSystem, so HTML
+	// edits between PIE runs wouldn't show up until full editor restart.
+	if (RendererPtr)
+	{
+		AsRenderer(RendererPtr)->PurgeMemory();
+	}
+#endif
+
 	// Don't tear down the platform — it's module-owned and survives PIE
 	// restarts. Just clear our local pointers so we don't dangle.
 	RendererPtr = nullptr;
@@ -416,7 +429,24 @@ void UTSICWebUISubsystem::RecreateViewTextureForLoad(FName ViewName)
 	{
 		return;
 	}
+
+	// Ghost-resize: ask Ultralight to reflow at +1px, then immediately back to
+	// the original. Two real-dimensioned Resize calls force the view to
+	// re-render layout immediately, which is what the user observes as the
+	// "drag the window edge a pixel" workaround. set_needs_paint alone is
+	// insufficient — it gets latched on every frame yet Slate stays on the
+	// pre-transition brush. Pair with a fresh UTexture2D so the slate widget
+	// binds onto a clean surface whose first painted frame is the new page.
+	const uint32 W = FMath::Max<uint32>(1, Entry->Width);
+	const uint32 H = FMath::Max<uint32>(1, Entry->Height);
+	if (Entry->View.get())
+	{
+		Entry->View->Resize(W + 1, H);
+		Entry->View->Resize(W, H);
+	}
 	RecreateViewTexture(*Entry);
+	UE_LOG(LogTSICWebUI, Log, TEXT("RecreateViewTextureForLoad '%s' (%ux%u) — nudged reflow + new texture"),
+		*ViewName.ToString(), W, H);
 }
 
 void UTSICWebUISubsystem::LoadURL(FName ViewName, const FString& URL)
@@ -1220,6 +1250,22 @@ void UTSICWebUISubsystem::RegisterConsoleCommands()
 		}),
 		ECVF_Default);
 
+	PurgeCacheCmd = Mgr.RegisterConsoleCommand(
+		TEXT("WebUI.PurgeCache"),
+		TEXT("Purge WebCore's in-memory resource cache so the next page load re-reads HTML/CSS/JS from disk. ")
+		TEXT("Use after editing HTML mid-PIE; combine with a reload to see the change immediately."),
+		FConsoleCommandDelegate::CreateLambda([this]()
+		{
+			if (!RendererPtr)
+			{
+				UE_LOG(LogTSICWebUI, Warning, TEXT("WebUI.PurgeCache: renderer not initialised."));
+				return;
+			}
+			AsRenderer(RendererPtr)->PurgeMemory();
+			UE_LOG(LogTSICWebUI, Display, TEXT("WebUI.PurgeCache: WebCore memory cache purged."));
+		}),
+		ECVF_Default);
+
 	EvalJSCmd = Mgr.RegisterConsoleCommand(
 		TEXT("WebUI.EvalJS"),
 		TEXT("WebUI.EvalJS <viewname> <script> -- run a script on a view's JS context."),
@@ -1279,6 +1325,11 @@ void UTSICWebUISubsystem::UnregisterConsoleCommands()
 	{
 		IConsoleManager::Get().UnregisterConsoleObject(DumpCacheCmd);
 		DumpCacheCmd = nullptr;
+	}
+	if (PurgeCacheCmd)
+	{
+		IConsoleManager::Get().UnregisterConsoleObject(PurgeCacheCmd);
+		PurgeCacheCmd = nullptr;
 	}
 }
 

@@ -6,7 +6,10 @@ html, body {
   margin: 0; padding: 0; width: 100%; height: 100%;
   font-family: Georgia, "Libre Baskerville", serif;
   color: var(--cat-ink);
-  background: var(--cat-bg);
+  /* The WebUI overlays the game world. Default to transparent so HUD /
+     in-game pages don't paint a full-screen fill over gameplay. Menu
+     screens that want a panel look set their own background inline. */
+  background: transparent;
   overflow: hidden;
 }
 button { cursor: pointer; font-family: inherit; }

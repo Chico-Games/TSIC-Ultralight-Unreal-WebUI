@@ -222,6 +222,7 @@ private:
 	IConsoleCommand* EvalJSCmd = nullptr;
 	IConsoleCommand* DumpMessagesCmd = nullptr;
 	IConsoleCommand* DumpCacheCmd = nullptr;
+	IConsoleCommand* PurgeCacheCmd = nullptr;
 
 	TMap<FGameplayTag, TSharedPtr<FTSICWebMessageBridgeInfo>> MessageBridges;
 
