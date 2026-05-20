@@ -56,8 +56,9 @@ files into `Source/ThirdParty/UltralightSDK/`:
 
 ## License
 
-Repository code: MIT (see `LICENSE`). Ultralight SDK: Ultralight Inc's
-EULA (see `Source/ThirdParty/UltralightSDK/EULA.txt`).
+Repository code is dedicated to the public domain via [The Unlicense](https://unlicense.org)
+— take it, change it, ship it, do whatever. The Ultralight SDK is governed
+by Ultralight Inc's separate EULA (see `Source/ThirdParty/UltralightSDK/EULA.txt`).
 
 ## How this repo is updated
 
