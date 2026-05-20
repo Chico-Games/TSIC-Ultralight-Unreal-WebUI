@@ -1,0 +1,28 @@
+@import url("/shared/catalogue.css");
+@import url("/shared/tsic-ui.css");
+
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; padding: 0; width: 100%; height: 100%;
+  font-family: Georgia, "Libre Baskerville", serif;
+  color: var(--cat-ink);
+  background: var(--cat-bg);
+  overflow: hidden;
+}
+button { cursor: pointer; font-family: inherit; }
+input, textarea, select { font-family: inherit; }
+
+:root {
+  /* tsic-* vars remap onto the catalogue palette so every legacy class
+     inherits the paper / ink look automatically. */
+  --tsic-bg:        var(--cat-paper-panel);
+  --tsic-bg-strong: var(--cat-paper);
+  --tsic-accent:     var(--cat-green);
+  --tsic-accent-dim: var(--cat-green-soft);
+  --tsic-border:     var(--cat-border);
+  --tsic-text-dim:   var(--cat-ink-muted);
+
+  /* Font tokens — promote the repeated literal to a single source of truth
+     so utility classes and pages can reference --cat-font-serif. */
+  --cat-font-serif: Georgia, "Libre Baskerville", serif;
+}

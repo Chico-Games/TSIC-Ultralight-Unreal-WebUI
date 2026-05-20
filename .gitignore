@@ -1,0 +1,17 @@
+# Unreal generated
+Binaries/
+DerivedDataCache/
+Intermediate/
+Saved/
+.vs/
+.vscode/
+.idea/
+
+# Ultralight SDK — user must provide, see README
+Source/ThirdParty/UltralightSDK/Binaries/
+Source/ThirdParty/UltralightSDK/Win64/
+Source/ThirdParty/UltralightSDK/include/
+
+# OS/editor cruft
+.DS_Store
+Thumbs.db

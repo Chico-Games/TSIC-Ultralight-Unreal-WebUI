@@ -1,0 +1,124 @@
+/* Legacy .tsic-* classes restyled to match the catalogue UI palette so every
+   existing page renders in the unified paper-and-ink look without HTML edits. */
+
+.tsic-panel {
+  position: relative;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.36), rgba(255, 255, 255, 0.03)),
+    radial-gradient(circle at 10% 15%, rgba(82, 68, 47, 0.06) 0 1px, transparent 1px),
+    radial-gradient(circle at 70% 80%, rgba(82, 68, 47, 0.045) 0 1px, transparent 1px),
+    var(--cat-paper);
+  background-size: auto, 13px 13px, 19px 19px, auto;
+  border: 1px solid var(--cat-border);
+  box-shadow: inset 0 0 28px rgba(88, 72, 47, 0.08);
+  color: var(--cat-ink);
+  padding: 16px;
+  pointer-events: auto;
+}
+
+.tsic-button {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: var(--cat-green);
+  color: #f7edd9;
+  border: 1px solid #273120;
+  padding: 8px 14px;
+  font-family: Georgia, "Libre Baskerville", serif;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  box-shadow: var(--cat-shadow-soft);
+  cursor: pointer;
+  transition: background-color 160ms ease, color 160ms ease,
+              border-color 160ms ease, transform 120ms ease,
+              box-shadow 160ms ease;
+}
+.tsic-button:hover { background: var(--cat-green-hover); transform: translateY(-1px); }
+.tsic-button:active { transform: translateY(0); }
+
+.tsic-button:disabled,
+.tsic-button[disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* Secondary look — used by Cancel / Back / Close buttons. */
+.tsic-button.cancel, .tsic-button.secondary,
+.tsic-button[data-variant="secondary"] {
+  background: #f4ebd9;
+  color: var(--cat-ink);
+  border-color: var(--cat-border-strong);
+  box-shadow: none;
+}
+.tsic-button.cancel:hover, .tsic-button.secondary:hover,
+.tsic-button[data-variant="secondary"]:hover { background: #f9f1e3; }
+
+.tsic-input {
+  background: var(--cat-paper-soft);
+  color: var(--cat-ink);
+  border: 1px solid var(--cat-border-strong);
+  padding: 6px 10px;
+  font-family: Georgia, "Libre Baskerville", serif;
+  font-size: 12px;
+}
+.tsic-input::placeholder { color: var(--cat-ink-soft); }
+.tsic-input:focus { outline: none; border-color: var(--cat-green); }
+
+.tsic-slot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 56px; height: 56px;
+  background: #e9dfc8;
+  border: 1px solid #b7aa91;
+  color: var(--cat-ink);
+  position: relative;
+}
+.tsic-slot.selected {
+  background: var(--cat-green);
+  color: #f7edd9;
+  border-color: #273120;
+  box-shadow: 0 0 0 2px rgba(35, 31, 24, 0.18);
+}
+.tsic-slot .count {
+  position: absolute; bottom: 2px; right: 4px;
+  font-size: 11px; font-weight: 700;
+  color: var(--cat-ink-dark);
+  text-shadow: 0 1px 2px rgba(247, 237, 217, 0.8);
+}
+
+.tsic-bar-track {
+  position: relative; height: 18px;
+  border: 1px solid var(--cat-border-strong);
+  background: #efe2c8;
+  overflow: hidden;
+}
+.tsic-bar-fill {
+  position: absolute; left: 0; top: 0; bottom: 0;
+  background: linear-gradient(180deg, var(--cat-green), var(--cat-green-soft));
+  transition: width 0.1s linear;
+}
+
+/* HUD overlay panels — used by chat / notifications / detection etc.
+   They sit over the 3D scene so the panel is parchment-coloured but slightly
+   translucent so the world reads through. */
+.tsic-hud-panel {
+  background: rgba(241, 229, 207, 0.88);
+  border: 1px solid var(--cat-border);
+  color: var(--cat-ink);
+  padding: 10px;
+}
+
+/* Generic text-link styling for inline anchors / back-style buttons. */
+.tsic-link {
+  color: var(--cat-green);
+  text-decoration: underline;
+  cursor: pointer;
+}
+.tsic-link:hover { color: var(--cat-green-hover); }
