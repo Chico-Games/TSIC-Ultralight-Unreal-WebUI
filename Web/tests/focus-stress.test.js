@@ -500,6 +500,47 @@ TSICTestHarness.register({
 });
 
 TSICTestHarness.register({
+    // Regression: in the playground's INPUT pane, every direction button
+    // lives in the host page outside the iframe. Clicking one moves browser
+    // focus to that host button, which resets the iframe's activeElement to
+    // <body>. step() must then resume from the engine's own marker
+    // ([data-tsic-focused]) — not bounce back to initial-focus on every press.
+    name: 'Focus/Stress: nav resumes from marker after activeElement reverts to body',
+    file: '/screens/main-menu.html',
+    async run(ctx) {
+        ctx.focus.disableSmoothScroll();
+        ctx.focus.resetMemory();
+        ctx.mode('Gamepad');
+        const initial = await TSICTestHarness.fx.awaitInitialFocus(ctx);
+        ctx.expect(ctx.assert.truthy(initial, 'expected initial focus to land'));
+        // Move off the initial button so we have a distinct "current" target.
+        ctx.focus.pressDir('down'); await new Promise(r => setTimeout(r, 30));
+        const moved = ctx.doc.activeElement;
+        ctx.expect(ctx.assert.truthy(moved && moved !== initial,
+            'pressDir(down) should leave initial; activeElement=' + (moved && moved.id)));
+        ctx.expect(ctx.assert.truthy(moved.hasAttribute('data-tsic-focused'),
+            'engine should have stamped [data-tsic-focused] on the new active element'));
+        // Simulate the iframe losing focus to a host-page click — the browser
+        // resets activeElement to <body>, but the engine's marker stays put.
+        moved.blur();
+        await new Promise(r => setTimeout(r, 10));
+        ctx.expect(ctx.assert.eq(ctx.doc.activeElement, ctx.doc.body,
+            'precondition: blur should leave activeElement on <body>'));
+        ctx.expect(ctx.assert.truthy(moved.hasAttribute('data-tsic-focused'),
+            'precondition: focused marker should survive blur'));
+        // Press a direction — focus must continue from the marker, not the
+        // initial button. (Before the fix, step() saw activeElement=<body>,
+        // didn't find it in candidates, and fell straight back to initial.)
+        ctx.focus.pressDir('down'); await new Promise(r => setTimeout(r, 30));
+        const after = ctx.doc.activeElement;
+        ctx.expect(ctx.assert.truthy(after && after !== initial,
+            'after blur+nav, focus must NOT bounce to initial; got ' + (after && after.id)));
+        ctx.expect(ctx.assert.truthy(after !== moved,
+            'after blur+nav, focus should advance past the marker; got ' + (after && after.id)));
+    },
+});
+
+TSICTestHarness.register({
     name: 'Focus/Stress: full mode → confirm → cancel cycle',
     file: '/screens/inventory.html',
     async run(ctx) {

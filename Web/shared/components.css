@@ -122,3 +122,43 @@
   cursor: pointer;
 }
 .tsic-link:hover { color: var(--cat-green-hover); }
+
+/* Row-as-button — used by list screens (save/load, repair, upgrade, summoner,
+   universal-storage-setup) where each list entry IS its primary action. The
+   whole row is a real <button>, so gamepad focus + Confirm and mouse click
+   trigger the same action. Resets the default button chrome and reuses the
+   paper-panel look; :hover styling auto-mirrors to gamepad focus via
+   tsic-focus.js's hover-rule mirror. */
+.tsic-row-button {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  background: var(--cat-paper-panel);
+  border: 1px solid var(--cat-border);
+  color: var(--cat-ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  padding: 8px 12px;
+  transition: background-color 160ms ease, border-color 160ms ease,
+              box-shadow 160ms ease, transform 120ms ease;
+}
+.tsic-row-button:hover {
+  background: var(--cat-paper);
+  border-color: var(--cat-border-strong);
+  box-shadow: var(--cat-shadow-soft);
+}
+.tsic-row-button:active { transform: translateY(1px); }
+.tsic-row-button:disabled,
+.tsic-row-button[disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background: var(--cat-paper-muted);
+}
+.tsic-row-button:disabled:hover,
+.tsic-row-button[disabled]:hover {
+  background: var(--cat-paper-muted);
+  border-color: var(--cat-border);
+  box-shadow: none;
+  transform: none;
+}

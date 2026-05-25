@@ -15,6 +15,34 @@ html, body {
 button { cursor: pointer; font-family: inherit; }
 input, textarea, select { font-family: inherit; }
 
+/* Game UIs aren't documents — treat labels/panels as glyphs, not text. No
+   accidental drag-selection, no I-beam cursor over headings/buttons/labels.
+   Editable inputs override this back to text/text-cursor below. */
+html, body, * {
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+input:not([type=button]):not([type=submit]):not([type=reset]):not([type=checkbox]):not([type=radio]):not([type=range]):not([type=color]):not([type=file]):not([type=image]):not([type=hidden]),
+textarea,
+[contenteditable="true"],
+[contenteditable=""] {
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
+}
+/* Range slider — explicit pointer/grab cursors so the thumb stays draggable
+   even though the universal `cursor: default` rule above would otherwise
+   override the browser's built-in slider styling. touch-action+pointer-events
+   make sure no parent transparently swallows the drag. */
+input[type=range] {
+  cursor: pointer;
+  pointer-events: auto;
+  touch-action: manipulation;
+}
+input[type=range]::-webkit-slider-thumb { cursor: grab; }
+input[type=range]:active::-webkit-slider-thumb { cursor: grabbing; }
+
 :root {
   /* tsic-* vars remap onto the catalogue palette so every legacy class
      inherits the paper / ink look automatically. */

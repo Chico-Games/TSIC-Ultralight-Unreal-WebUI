@@ -3,6 +3,7 @@
 #include "TSICWebUISubsystem.h"
 #include "TSICWebUITypes.h"
 
+#include "CoreGlobals.h"
 #include "Engine/Engine.h"
 #include "Engine/GameInstance.h"
 #include "Engine/Texture2D.h"
@@ -60,9 +61,59 @@ STSICWebViewSlate::~STSICWebViewSlate()
 void STSICWebViewSlate::Tick(const FGeometry& AllottedGeometry, const double /*InCurrentTime*/, const float /*InDeltaTime*/)
 {
 	UTSICWebUISubsystem* Subsystem = GetSubsystem();
+
+	// One-shot diagnostic: dump the world-resolution state the very first time
+	// Tick fires for this widget. Targets the embedded-vs-floating PIE asymmetry —
+	// floating PIE renders the Ultralight texture, embedded "Selected Viewport"
+	// PIE doesn't, and GetSubsystem() relies on GEngine->GetCurrentPlayWorld()
+	// which is gated by UE::GetPlayInEditorID().
+	if (!bDiagLoggedFirstTick)
+	{
+		bDiagLoggedFirstTick = true;
+		const int32 PIEId = UE::GetPlayInEditorID();
+		UWorld* const CurPlayWorld = GEngine ? GEngine->GetCurrentPlayWorld() : nullptr;
+		const FVector2D LocalSizeDbg = AllottedGeometry.GetLocalSize();
+		UE_LOG(LogTSICWebUI, Warning,
+			TEXT("[diag] Tick#1 view='%s' size=%.0fx%.0f scale=%.3f PIEId=%d CurrentPlayWorld=%s SubsystemFound=%d"),
+			*ViewName.ToString(),
+			LocalSizeDbg.X, LocalSizeDbg.Y,
+			AllottedGeometry.Scale,
+			PIEId,
+			*GetNameSafe(CurPlayWorld),
+			Subsystem != nullptr ? 1 : 0);
+
+		if (GEngine)
+		{
+			const TIndirectArray<FWorldContext>& Contexts = GEngine->GetWorldContexts();
+			UE_LOG(LogTSICWebUI, Warning, TEXT("[diag] Tick#1 WorldContexts count=%d"), Contexts.Num());
+			for (int32 i = 0; i < Contexts.Num(); ++i)
+			{
+				const FWorldContext& Ctx = Contexts[i];
+				UE_LOG(LogTSICWebUI, Warning,
+					TEXT("[diag]   [%d] WorldType=%d PIEInstance=%d PrimaryPIE=%d World=%s GI=%s Viewport=%s"),
+					i,
+					static_cast<int32>(Ctx.WorldType.GetValue()),
+					Ctx.PIEInstance,
+					Ctx.bIsPrimaryPIEInstance ? 1 : 0,
+					*GetNameSafe(Ctx.World()),
+					*GetNameSafe(Ctx.OwningGameInstance),
+					*GetNameSafe(Ctx.GameViewport));
+			}
+		}
+	}
+
 	if (!Subsystem)
 	{
 		return;
+	}
+
+	if (!bDiagLoggedFirstReady)
+	{
+		bDiagLoggedFirstReady = true;
+		UE_LOG(LogTSICWebUI, Warning,
+			TEXT("[diag] Subsystem first reachable for view='%s' PIEId=%d"),
+			*ViewName.ToString(),
+			UE::GetPlayInEditorID());
 	}
 
 	// Auto-resize the underlying Ultralight view to match this widget's on-screen

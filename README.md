@@ -1,6 +1,6 @@
 # TSIC Ultralight Unreal WebUI — reference, not a plugin
 
-How I integrated [Ultralight](https://ultralig.ht) into Unreal Engine 5.6
+How I integrated [Ultralight](https://ultralig.ht) into Unreal Engine 5.7
 for *The Store Is Closed*. Reference code, not a drop-in plugin. It will
 not compile on clone, names carry the `TSIC` prefix, and the SDK is not
 redistributed here. No support offered.
@@ -53,6 +53,27 @@ files into `Source/ThirdParty/UltralightSDK/`:
 | `base.css` / `components.css` / `tsic-ui.css` | Reset + design tokens, component styles, utility classes. |
 
 **Tests (`Web/tests/`)** — Playwright unit tests for the runtime above.
+
+## Known limitation: PIE play mode
+
+The HTML view does **not** render in the editor's embedded "Selected
+Viewport" PIE mode. It only works when you Play In **New Editor Window**
+(`PlayMode_InEditorFloating`) or run a standalone/packaged build. In the
+embedded viewport, the Slate overlay and Ultralight's GPU output do not
+composite correctly — you'll see a blank or checkered texture and input
+focus/keyboard capture misbehaves.
+
+If you're driving PIE from Python, set the play mode before starting:
+
+```python
+import unreal
+play_settings = unreal.get_default_object(unreal.LevelEditorPlaySettings)
+play_settings.set_editor_property(
+    "last_executed_play_mode_type",
+    unreal.PlayModeType.PLAY_MODE_IN_EDITOR_FLOATING,
+)
+unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).editor_request_begin_play()
+```
 
 ## License
 

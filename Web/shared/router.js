@@ -9,6 +9,20 @@
 // Also reads:
 //   <meta name="tsic-input-mode" content="InputMode.Menu.Map">       (existing)
 //   <meta name="tsic-action-bar-context" content='[ {...}, ... ]'>   (this spec)
+//   <meta name="tsic-cancel-cmd"   content="UI.Cmd.Settings.Back">    (cancel/back command)
+//   <meta name="tsic-debug" content="true">                           (opt out of director routing)
+//
+// Debug / out-of-band pages reached via console command or direct LoadURL
+// (debug grids, test harness, playground) declare tsic-debug=true so the
+// sticky UI.Screen.Changed broadcast doesn't instantly redirect them back
+// to the active in-game screen on mount. They still participate in input
+// mode, cancel/back, and action-bar wiring as normal.
+//
+// Cancel/back: pages that push an input-mode tag automatically wire ESC /
+// IA_UI_CancelBack to publish a close command. Default is UI.Cmd.Pause.Resume
+// (which the director routes to SetScreen(InGame) + unpause). Override via
+// the tsic-cancel-cmd meta tag when a screen needs different back semantics
+// (Settings → UI.Cmd.Settings.Back, etc.).
 (function () {
   // HUD overlay screens never redirect on Screen.Changed — they're meant to
   // sit on top of whichever main screen is active and react to the broadcast
@@ -90,6 +104,23 @@
     return m ? m.getAttribute('content') : null;
   }
 
+  function isDebugScreen() {
+    const m = document.querySelector('meta[name="tsic-debug"]');
+    return !!m && m.getAttribute('content') === 'true';
+  }
+
+  function cancelCmd() {
+    const m = document.querySelector('meta[name="tsic-cancel-cmd"]');
+    const raw = m ? m.getAttribute('content') : null;
+    if (raw && raw.trim().length > 0) return raw.trim();
+    // Debug pages default to UI.Cmd.Debug.Close so the director picks
+    // MainMenu vs InGame based on the loaded world instead of forcing
+    // Pause.Resume (which always routes to InGame and would strand a
+    // user who opened the debug page from the main menu).
+    if (isDebugScreen()) return 'UI.Cmd.Debug.Close';
+    return 'UI.Cmd.Pause.Resume';
+  }
+
   function staticActionBarContext() {
     const m = document.querySelector('meta[name="tsic-action-bar-context"]');
     if (!m) return null;
@@ -136,6 +167,11 @@
       if (payload.Name === myScreen()) return;
       // Overlays observe Screen.Changed but never navigate themselves.
       if (OVERLAY_SCREENS.has(myScreen())) return;
+      // Debug / out-of-band pages opt out via <meta name="tsic-debug" content="true">.
+      // UI.Screen.Changed is sticky, so without this guard the bridge would
+      // replay the active in-game screen on mount and immediately redirect
+      // the debug page away (the "WebUI.Map.DebugGrid closing on open" bug).
+      if (isDebugScreen()) return;
       const file = fileFor(payload.Name);
       if (!file) {
         console.warn('[router] no file mapping for screen', payload.Name);
@@ -156,6 +192,19 @@
       };
       window.addEventListener('beforeunload', removeInputTagOnce);
       window.addEventListener('pagehide', removeInputTagOnce);
+
+      // IA_UI_CancelBack auto-wiring: only on screens that push a menu input
+      // tag (so IMC_CancelBack is actually active here). Fires regardless of
+      // WebView focus state — the bridge publishes the IA event over IPC,
+      // not via the keyboard event loop. Pages may opt out by setting the
+      // meta to an empty string, or override the command via tsic-cancel-cmd.
+      const cmd = cancelCmd();
+      if (cmd) {
+        window.tsic.on('tsic.msg.UI.Input.IA_UI_CancelBack', (p) => {
+          if (!p || p.Phase !== 'Started') return;
+          window.tsic.publishMessage(cmd, {});
+        });
+      }
     }
 
     // Modder API helpers — bound on window.tsic after the native bootstrap.

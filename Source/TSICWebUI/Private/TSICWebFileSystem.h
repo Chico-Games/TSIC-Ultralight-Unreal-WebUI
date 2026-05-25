@@ -17,6 +17,12 @@ public:
 	/** Set the active game instance — used to resolve tex:// URLs against the registry. */
 	void SetGameInstance(UGameInstance* InGameInstance);
 
+	/** Register an additional content search path (checked after ContentRoot, before ResourceRoot). */
+	void AddOverlayRoot(const FString& InAbsolutePath);
+
+	/** Remove a previously registered overlay root. */
+	void RemoveOverlayRoot(const FString& InAbsolutePath);
+
 	virtual bool FileExists(const ultralight::String& FilePath) override;
 	virtual ultralight::String GetFileMimeType(const ultralight::String& FilePath) override;
 	virtual ultralight::String GetFileCharset(const ultralight::String& FilePath) override;
@@ -27,5 +33,6 @@ private:
 
 	FString ContentRoot;
 	FString ResourceRoot;
+	TArray<FString> OverlayRoots;
 	TWeakObjectPtr<UGameInstance> GameInstanceWeak;
 };

@@ -112,6 +112,13 @@
     font-size: 12px;
     line-height: 1.3;
 }
+/* When .tsic-list-row is a <button> (inventory + storage rows), reset the
+   default button chrome so flex layout + hover/selected states still apply. */
+button.tsic-list-row {
+    font: inherit;
+    text-align: left;
+    width: 100%;
+}
 .tsic-list-row:hover { background: rgba(241, 229, 207, 0.85); border-color: var(--tsic-border); }
 .tsic-list-row.is-selected { background: var(--tsic-accent-dim); border-color: var(--cat-border-strong); }
 .tsic-list-row.is-locked { opacity: 0.45; cursor: not-allowed; }

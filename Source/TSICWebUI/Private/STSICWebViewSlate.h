@@ -66,4 +66,9 @@ private:
 	mutable TSharedPtr<FDeferredCleanupSlateBrush> DeferredBrush;
 	int32 LastResizeW = 0;
 	int32 LastResizeH = 0;
+
+	// One-shot diagnostics for tracking why the Ultralight texture surfaces
+	// in floating-window PIE but not embedded ("Selected Viewport") PIE.
+	bool bDiagLoggedFirstTick = false;
+	bool bDiagLoggedFirstReady = false;
 };

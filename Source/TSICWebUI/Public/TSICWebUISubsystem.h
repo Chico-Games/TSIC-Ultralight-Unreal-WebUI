@@ -11,9 +11,6 @@
 #include "TSICWebUISubsystem.generated.h"
 
 struct FTSICWebMessageBridgeInfo;
-struct FOnAttributeChangeData;
-struct FGameplayAttribute;
-class UAbilitySystemComponent;
 
 class UTexture2D;
 struct FTSICWebViewEntry;
@@ -139,15 +136,6 @@ public:
 	// Registers a bridge entry; called by TSICWebBridgeMessage<T>().
 	void RegisterMessageBridge(FTSICWebMessageBridgeInfo&& Info);
 
-	// Bridge an ASC attribute onto a sticky bus channel. The provided callback
-	// runs every time the attribute changes and returns the JSON payload to broadcast.
-	// Re-registering with the same channel replaces the previous binding.
-	void BridgeAttribute(FName Channel, UAbilitySystemComponent* ASC,
-		const FGameplayAttribute& PrimaryAttribute, const FGameplayAttribute& OptionalMaxAttribute);
-
-	// Unregister a previously-bridged attribute (e.g. when the player pawn dies).
-	void UnbridgeAttribute(FName Channel);
-
 	// --- Ultralight ImageSource bridge (Map screen world-map / FOW) ---
 
 	/**
@@ -163,6 +151,14 @@ public:
 
 	/** Remove the binding entirely. */
 	void UnregisterImageSource(FName Identifier);
+
+	// --- File-system overlay roots (mod web content) ---
+
+	/** Register an additional content search path for file resolution (checked after ContentRoot). */
+	void AddFileOverlayRoot(const FString& InAbsolutePath);
+
+	/** Remove a previously registered overlay root. */
+	void RemoveFileOverlayRoot(const FString& InAbsolutePath);
 
 	// Cache-aware bridged broadcast. Called by TSICWebBridgeMessage<T> only.
 	// Writes the JSON payload to the per-tag cache (skipped if bTransient) and
@@ -223,25 +219,13 @@ private:
 	IConsoleCommand* DumpMessagesCmd = nullptr;
 	IConsoleCommand* DumpCacheCmd = nullptr;
 	IConsoleCommand* PurgeCacheCmd = nullptr;
+	IConsoleCommand* ReloadCmd = nullptr;
+	IConsoleCommand* DebugCmd = nullptr;
 
 	TMap<FGameplayTag, TSharedPtr<FTSICWebMessageBridgeInfo>> MessageBridges;
 
 	// Per-tag latest JSON payload + write timestamp. No UObject references retained.
 	TMap<FGameplayTag, FTSICCachedMessage> CachedPayloadJson;
-
-	struct FAttributeBridgeEntry
-	{
-		TWeakObjectPtr<UAbilitySystemComponent> ASC;
-		FName Channel;
-		FName PrimaryName;
-		FName MaxName;
-		FDelegateHandle PrimaryHandle;
-		FDelegateHandle MaxHandle;
-	};
-	TMap<FName, FAttributeBridgeEntry> AttributeBridges;
-
-	void BroadcastAttributeValue(const FAttributeBridgeEntry& Entry);
-	void OnBridgedAttributeChanged(const FOnAttributeChangeData& ChangeData, FName Channel);
 
 	struct FImageSourceEntry
 	{

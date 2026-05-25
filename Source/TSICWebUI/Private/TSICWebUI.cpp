@@ -78,6 +78,11 @@ void FTSICWebUIModule::StartupModule()
 	// during PreInitPreStartupScreen.
 	FCoreDelegates::OnPostEngineInit.AddLambda([]()
 	{
+		if (IsRunningCommandlet())
+		{
+			return;
+		}
+
 		auto ForceCVarOff = [](const TCHAR* Name)
 		{
 			IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(Name);

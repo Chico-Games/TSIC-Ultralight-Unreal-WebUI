@@ -119,29 +119,67 @@
             if (!from) return null;
             const fr = from.getBoundingClientRect();
             const fc = centre(fr);
-            let best = null;
-            let bestScore = Infinity;
-            let bestIdx = Infinity;
+            // Two-pass scoring. Pass A (overlap): only candidates whose
+            // perpendicular extent overlaps the source rect — i.e. "things
+            // on the same row" for L/R, "same column" for U/D. Among those
+            // we pick by directional distance only. Pass B (fallback): no
+            // overlap exists, fall back to spatial-nearest with a perp
+            // penalty so we still favour aligned-ish targets.
+            //
+            // Without this, a button slightly to the left and well above
+            // the source (dirDist=9, perpOffset=85) beats a far-but-aligned
+            // button on the same row (dirDist=367, perpOffset=0) — that's
+            // the new-store Back↔Create "L/R doesn't reach the logical
+            // neighbour" bug.
+            let bestOverlap = null, bestOverlapScore = Infinity, bestOverlapIdx = Infinity;
+            let bestAny = null, bestAnyScore = Infinity, bestAnyIdx = Infinity;
             candidates.forEach((c, idx) => {
                 if (c === from) return;
                 const cr = c.getBoundingClientRect();
                 const cc = centre(cr);
-                let dirDist = 0, perpOffset = 0, inHalfPlane = false;
+                let dirDist = 0, perpOffset = 0, inHalfPlane = false, overlaps = false;
                 switch (dir) {
-                    case 'up':    inHalfPlane = cc.y < fc.y - 1; dirDist = fc.y - cc.y; perpOffset = Math.abs(cc.x - fc.x); break;
-                    case 'down':  inHalfPlane = cc.y > fc.y + 1; dirDist = cc.y - fc.y; perpOffset = Math.abs(cc.x - fc.x); break;
-                    case 'left':  inHalfPlane = cc.x < fc.x - 1; dirDist = fc.x - cc.x; perpOffset = Math.abs(cc.y - fc.y); break;
-                    case 'right': inHalfPlane = cc.x > fc.x + 1; dirDist = cc.x - fc.x; perpOffset = Math.abs(cc.y - fc.y); break;
+                    case 'up':
+                        inHalfPlane = cc.y < fc.y - 1;
+                        dirDist = fc.y - cc.y;
+                        perpOffset = Math.abs(cc.x - fc.x);
+                        overlaps = cr.left < fr.right && cr.right > fr.left;
+                        break;
+                    case 'down':
+                        inHalfPlane = cc.y > fc.y + 1;
+                        dirDist = cc.y - fc.y;
+                        perpOffset = Math.abs(cc.x - fc.x);
+                        overlaps = cr.left < fr.right && cr.right > fr.left;
+                        break;
+                    case 'left':
+                        inHalfPlane = cc.x < fc.x - 1;
+                        dirDist = fc.x - cc.x;
+                        perpOffset = Math.abs(cc.y - fc.y);
+                        overlaps = cr.top < fr.bottom && cr.bottom > fr.top;
+                        break;
+                    case 'right':
+                        inHalfPlane = cc.x > fc.x + 1;
+                        dirDist = cc.x - fc.x;
+                        perpOffset = Math.abs(cc.y - fc.y);
+                        overlaps = cr.top < fr.bottom && cr.bottom > fr.top;
+                        break;
                 }
                 if (!inHalfPlane) return;
+                if (overlaps) {
+                    if (dirDist < bestOverlapScore || (dirDist === bestOverlapScore && idx < bestOverlapIdx)) {
+                        bestOverlap = c;
+                        bestOverlapScore = dirDist;
+                        bestOverlapIdx = idx;
+                    }
+                }
                 const score = dirDist + perpOffset * 3;
-                if (score < bestScore || (score === bestScore && idx < bestIdx)) {
-                    best = c;
-                    bestScore = score;
-                    bestIdx = idx;
+                if (score < bestAnyScore || (score === bestAnyScore && idx < bestAnyIdx)) {
+                    bestAny = c;
+                    bestAnyScore = score;
+                    bestAnyIdx = idx;
                 }
             });
-            return best;
+            return bestOverlap || bestAny;
         }
 
         // ---- Scroll into view --------------------------------------------
@@ -215,7 +253,18 @@
                 const layoutless = candidates.length === 0;
                 if (layoutless) candidates = structuralFocusableSet(scopeRoot);
                 if (candidates.length === 0) return false;
-                const cur = document.activeElement;
+                // activeElement reverts to <body> the moment focus leaves the
+                // iframe — e.g. the playground's host-page direction buttons
+                // steal focus on click. Fall back to the engine's own ring
+                // marker so navigation resumes from where it left off instead
+                // of bouncing to initial on every press.
+                let cur = document.activeElement;
+                if (!cur || !candidates.includes(cur)) {
+                    const marked = (scopeRoot.querySelector
+                        ? scopeRoot.querySelector('[data-tsic-focused]')
+                        : document.querySelector('[data-tsic-focused]'));
+                    if (marked && candidates.includes(marked)) cur = marked;
+                }
                 if (!cur || !candidates.includes(cur)) {
                     const init = findInitial();
                     if (init && candidates.includes(init)) return api.focus(init, { trust: layoutless });
@@ -330,6 +379,35 @@
             }
         });
 
+        // Returns the element gamepad nav should treat as "current" —
+        // activeElement if it's a real focus, else the engine's own marker
+        // (matches the same fallback step()/Confirm use after iframe focus
+        // loss).
+        function currentFocused() {
+            const a = document.activeElement;
+            if (a && a !== document.body) return a;
+            return document.querySelector('[data-tsic-focused]');
+        }
+
+        // Slider helper: L/R on a focused <input type=range> nudges the
+        // value by one step instead of moving focus. U/D still moves focus
+        // out of the slider row so navigation flows naturally.
+        function nudgeRange(el, dir) {
+            const step = Number(el.step) || 1;
+            const min = Number(el.min);
+            const max = Number(el.max);
+            const cur = Number(el.value) || 0;
+            const delta = (dir === 'right') ? step : -step;
+            let next = cur + delta;
+            if (!Number.isNaN(min)) next = Math.max(min, next);
+            if (!Number.isNaN(max)) next = Math.min(max, next);
+            if (next === cur) return;
+            el.value = String(next);
+            // Both events so any listener (oninput / onchange) reacts.
+            try { el.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {}
+            try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) {}
+        }
+
         let lastNavAt = 0;
         t.on('tsic.msg.UI.Input.IA_UI_Navigate', (payload) => {
             if (!State.enabled || State.mode !== 'Gamepad') return;
@@ -344,6 +422,15 @@
             const dir = (ax > ay)
                 ? (v.X > 0 ? 'right' : 'left')
                 : (v.Y > 0 ? 'up' : 'down');
+            // Horizontal nudge for sliders — they're focusable but L/R should
+            // tweak the value, not jump to the next column.
+            if (dir === 'left' || dir === 'right') {
+                const cur = currentFocused();
+                if (cur && cur.tagName === 'INPUT' && cur.type === 'range' && !cur.disabled) {
+                    nudgeRange(cur, dir);
+                    return;
+                }
+            }
             api.step(dir);
         });
 
@@ -351,18 +438,114 @@
             if (!State.enabled || State.mode !== 'Gamepad') return;
             if (!payload || payload.Phase !== 'Started') return;
             const a = document.activeElement;
-            if (a && typeof a.click === 'function') {
-                try { a.click(); } catch (e) { console.warn('[tsic-focus] confirm click failed', e); }
+            // Same fallback as step() — when iframe lost focus the marker is the
+            // source of truth.
+            const target = (a && a !== document.body) ? a : document.querySelector('[data-tsic-focused]');
+            if (!target) return;
+            // Pages with a "select vs commit" distinction (list rows where
+            // single-click selects and double-click commits) listen for a
+            // 'tsic:confirm' event and call preventDefault to suppress the
+            // click fallback. Plain buttons ignore the event and get a
+            // regular el.click().
+            let proceed = true;
+            try {
+                const ev = new CustomEvent('tsic:confirm', { bubbles: true, cancelable: true });
+                proceed = target.dispatchEvent(ev);
+            } catch (e) { /* old DOM — skip and click directly */ }
+            if (proceed && typeof target.click === 'function') {
+                try { target.click(); } catch (e) { console.warn('[tsic-focus] confirm click failed', e); }
             }
         });
 
         t.on('tsic.msg.UI.Input.IA_UI_CancelBack', (payload) => {
             if (!State.enabled || State.mode !== 'Gamepad') return;
             if (!payload || payload.Phase !== 'Started') return;
-            if (State.scopeStack.length > 0) {
-                api.popScope();
-            }
+            if (State.scopeStack.length > 0) api.popScope();
             // else: let the page's own Esc / close-screen handler take over.
+        });
+
+        // Next/Prev tab — cycles tabs in a [data-tsic-tab-bar] container.
+        // Picks the tab bar nearest to current focus so multi-pane screens
+        // (e.g. storage's player ↔ container split) route tab keys to the
+        // side you're currently in. Falls back to the first tab bar on the
+        // page if focus isn't inside one.
+        //
+        // Tab bar convention:
+        //   <div data-tsic-tab-bar>
+        //     <button class="my-tab active">A</button>
+        //     <button class="my-tab">B</button>
+        //   </div>
+        // Active class: any of .active / .is-active / [aria-selected=true].
+        function findTabBar() {
+            const focus = currentFocused();
+            if (focus) {
+                const inside = focus.closest && focus.closest('[data-tsic-tab-bar]');
+                if (inside) return inside;
+                // Focus might be in a side pane that *contains* a tab bar
+                // alongside the list. Walk up looking for a tab-context that
+                // declares its associated bar.
+                const ctx = focus.closest && focus.closest('[data-tsic-tab-context]');
+                if (ctx) {
+                    const bar = ctx.querySelector('[data-tsic-tab-bar]');
+                    if (bar) return bar;
+                }
+            }
+            return document.querySelector('[data-tsic-tab-bar]');
+        }
+        function isActiveTab(el) {
+            return el.classList.contains('active')
+                || el.classList.contains('is-active')
+                || el.getAttribute('aria-selected') === 'true';
+        }
+        function cycleTab(delta) {
+            const bar = findTabBar();
+            if (!bar) return false;
+            const tabs = Array.from(bar.children).filter(c => c.nodeType === 1);
+            if (tabs.length === 0) return false;
+            const activeIdx = tabs.findIndex(isActiveTab);
+            const fromIdx = activeIdx >= 0 ? activeIdx : 0;
+            const nextIdx = (fromIdx + delta + tabs.length) % tabs.length;
+            const next = tabs[nextIdx];
+            if (next && typeof next.click === 'function') {
+                try { next.click(); } catch (e) {}
+            }
+            return true;
+        }
+        t.on('tsic.msg.UI.Input.IA_UI_NextTab', (payload) => {
+            if (!payload || payload.Phase !== 'Started') return;
+            cycleTab(+1);
+        });
+        t.on('tsic.msg.UI.Input.IA_UI_PreviousTab', (payload) => {
+            if (!payload || payload.Phase !== 'Started') return;
+            cycleTab(-1);
+        });
+
+        // IA_UI_NextPage / IA_UI_PreviousPage — page-jump the nearest
+        // scrollable ancestor of the focused element. Falls back to the
+        // active scrolling root when no element is focused.
+        function pageStep(delta) {
+            const focused = document.querySelector('[data-tsic-focused]') || document.activeElement;
+            let scroller = focused;
+            while (scroller && scroller !== document.body) {
+                const cs = getComputedStyle(scroller);
+                const oy = cs.overflowY;
+                if ((oy === 'auto' || oy === 'scroll') && scroller.scrollHeight > scroller.clientHeight) {
+                    break;
+                }
+                scroller = scroller.parentElement;
+            }
+            const target = (scroller && scroller !== document.body) ? scroller : document.scrollingElement;
+            if (!target) return;
+            const step = (target.clientHeight || window.innerHeight) * 0.9 * delta;
+            target.scrollBy({ top: step, left: 0, behavior: 'auto' });
+        }
+        t.on('tsic.msg.UI.Input.IA_UI_NextPage', (payload) => {
+            if (!payload || payload.Phase !== 'Started') return;
+            pageStep(+1);
+        });
+        t.on('tsic.msg.UI.Input.IA_UI_PreviousPage', (payload) => {
+            if (!payload || payload.Phase !== 'Started') return;
+            pageStep(-1);
         });
 
         // First-paint stamp so CSS can branch immediately.

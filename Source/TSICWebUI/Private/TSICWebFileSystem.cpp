@@ -56,6 +56,18 @@ void FTSICWebFileSystem::SetGameInstance(UGameInstance* InGameInstance)
 	TSICWebTex::ResetCache(); // game-instance swap invalidates tex registry
 }
 
+void FTSICWebFileSystem::AddOverlayRoot(const FString& InAbsolutePath)
+{
+	const FString Full = FPaths::ConvertRelativePathToFull(InAbsolutePath);
+	OverlayRoots.AddUnique(Full);
+}
+
+void FTSICWebFileSystem::RemoveOverlayRoot(const FString& InAbsolutePath)
+{
+	const FString Full = FPaths::ConvertRelativePathToFull(InAbsolutePath);
+	OverlayRoots.Remove(Full);
+}
+
 bool FTSICWebFileSystem::Resolve(const ultralight::String& InPath, FString& OutAbsolute) const
 {
 	const FString Rel = NormaliseRelative(InPath);
@@ -71,6 +83,16 @@ bool FTSICWebFileSystem::Resolve(const ultralight::String& InPath, FString& OutA
 	{
 		OutAbsolute = ContentCandidate;
 		return true;
+	}
+
+	for (const FString& Root : OverlayRoots)
+	{
+		const FString OverlayCandidate = FPaths::Combine(Root, Rel);
+		if (FileManager.FileExists(*OverlayCandidate))
+		{
+			OutAbsolute = OverlayCandidate;
+			return true;
+		}
 	}
 
 	const FString ResourceCandidate = FPaths::Combine(ResourceRoot, Rel);

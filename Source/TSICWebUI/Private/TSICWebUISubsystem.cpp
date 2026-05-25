@@ -12,13 +12,10 @@
 #include "TSICWebViewEntry.h"
 #include "TSICWebViewListener.h"
 
-#include "AbilitySystemComponent.h"
-#include "AttributeSet.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Engine/Texture2D.h"
 #include "Framework/Application/SlateApplication.h"
-#include "GameplayEffectTypes.h"
 #include "HAL/IConsoleManager.h"
 #include "HAL/PlatformApplicationMisc.h"
 #include "Input/Events.h"
@@ -115,16 +112,6 @@ void UTSICWebUISubsystem::Deinitialize()
 
 	UnregisterConsoleCommands();
 
-	// Tear down attribute bridges so we don't leak delegates onto destroyed ASCs.
-	{
-		TArray<FName> Channels;
-		AttributeBridges.GetKeys(Channels);
-		for (const FName& Ch : Channels)
-		{
-			UnbridgeAttribute(Ch);
-		}
-	}
-
 	// Unregister gameplay-message listeners.
 	for (TPair<FGameplayTag, TSharedPtr<FTSICWebMessageBridgeInfo>>& Pair : MessageBridges)
 	{
@@ -208,18 +195,12 @@ void UTSICWebUISubsystem::Tick(float /*DeltaTime*/)
 	// See the Ultralight integration docs.
 	Renderer->RefreshDisplay(0);
 
-	// Ultralight's needs_paint signal can latch off when content stops changing
-	// (or never lights up if the page initialised before the renderer first ticked).
-	// Force every view to repaint every frame — the CPU cost is fine for HUD-sized
-	// surfaces and we re-upload from dirty_bounds anyway.
-	for (auto& Pair : Views)
-	{
-		FTSICWebViewEntry& Entry = *Pair.Value;
-		if (Entry.View.get())
-		{
-			Entry.View->set_needs_paint(true);
-		}
-	}
+	// RefreshDisplay(0) above triggers requestAnimationFrame / CSS animation
+	// ticks. Do NOT force set_needs_paint(true) every frame — that causes
+	// Ultralight's path atlas to allocate new 6x6 textures every frame without
+	// ever reclaiming them, leading to unbounded VRAM growth and a crash within
+	// ~90 seconds. Let Ultralight's internal dirty tracking decide when to
+	// repaint; RefreshDisplay is sufficient for animation continuity.
 
 	Renderer->Render();
 
@@ -435,8 +416,12 @@ void UTSICWebUISubsystem::RecreateViewTextureForLoad(FName ViewName)
 	// re-render layout immediately, which is what the user observes as the
 	// "drag the window edge a pixel" workaround. set_needs_paint alone is
 	// insufficient — it gets latched on every frame yet Slate stays on the
-	// pre-transition brush. Pair with a fresh UTexture2D so the slate widget
-	// binds onto a clean surface whose first painted frame is the new page.
+	// pre-transition brush. The per-Tick ChildImage->Invalidate in
+	// STSICWebViewSlate handles the brush-staleness; we deliberately do NOT
+	// swap the UTexture2D here — destroying the live texture leaves Slate
+	// binding to EmptyBrush (or zeroed RHI pixels) for the frames it takes
+	// the new transient texture's RHI to come online, which the user sees
+	// as a flash on every screen navigation.
 	const uint32 W = FMath::Max<uint32>(1, Entry->Width);
 	const uint32 H = FMath::Max<uint32>(1, Entry->Height);
 	if (Entry->View.get())
@@ -444,8 +429,7 @@ void UTSICWebUISubsystem::RecreateViewTextureForLoad(FName ViewName)
 		Entry->View->Resize(W + 1, H);
 		Entry->View->Resize(W, H);
 	}
-	RecreateViewTexture(*Entry);
-	UE_LOG(LogTSICWebUI, Log, TEXT("RecreateViewTextureForLoad '%s' (%ux%u) — nudged reflow + new texture"),
+	UE_LOG(LogTSICWebUI, Log, TEXT("RecreateViewTextureForLoad '%s' (%ux%u) — nudged reflow"),
 		*ViewName.ToString(), W, H);
 }
 
@@ -919,7 +903,7 @@ void UTSICWebUISubsystem::DispatchPendingOutbound()
 }
 
 // =========================================================================
-// Message / attribute bridges
+// Message bridges
 // =========================================================================
 
 void UTSICWebUISubsystem::RegisterMessageBridge(FTSICWebMessageBridgeInfo&& Info)
@@ -935,6 +919,22 @@ void UTSICWebUISubsystem::RegisterMessageBridge(FTSICWebMessageBridgeInfo&& Info
 	UE_LOG(LogTSICWebUI, Log, TEXT("MessageBridge: %s -> %s (struct=%s, fields=%d)"),
 		*Slot->SourceTag.ToString(), *Slot->BusChannel.ToString(),
 		*Slot->StructName, Slot->FieldNames.Num());
+}
+
+void UTSICWebUISubsystem::AddFileOverlayRoot(const FString& InAbsolutePath)
+{
+	if (FileSystemPtr)
+	{
+		static_cast<FTSICWebFileSystem*>(FileSystemPtr)->AddOverlayRoot(InAbsolutePath);
+	}
+}
+
+void UTSICWebUISubsystem::RemoveFileOverlayRoot(const FString& InAbsolutePath)
+{
+	if (FileSystemPtr)
+	{
+		static_cast<FTSICWebFileSystem*>(FileSystemPtr)->RemoveOverlayRoot(InAbsolutePath);
+	}
 }
 
 void UTSICWebUISubsystem::BroadcastBridgedMessage(FGameplayTag Tag, FName Channel, const FString& PayloadJson, bool bTransient)
@@ -971,121 +971,6 @@ void UTSICWebUISubsystem::DumpCacheToLog() const
 			*Preview,
 			Pair.Value.PayloadJson.Len() > 80 ? TEXT("…") : TEXT(""));
 	}
-}
-
-void UTSICWebUISubsystem::BroadcastAttributeValue(const FAttributeBridgeEntry& Entry)
-{
-	UAbilitySystemComponent* ASC = Entry.ASC.Get();
-	if (!ASC || !EventBus)
-	{
-		return;
-	}
-
-	FString Json = TEXT("{\"current\":");
-	const FGameplayAttribute Primary = FGameplayAttribute(FindFProperty<FProperty>(ASC->GetClass(), Entry.PrimaryName));
-	float CurrentVal = 0.f;
-	if (Primary.IsValid())
-	{
-		CurrentVal = ASC->GetNumericAttribute(Primary);
-	}
-	Json += FString::SanitizeFloat(CurrentVal);
-	if (!Entry.MaxName.IsNone())
-	{
-		const FGameplayAttribute Max = FGameplayAttribute(FindFProperty<FProperty>(ASC->GetClass(), Entry.MaxName));
-		float MaxVal = 1.f;
-		if (Max.IsValid())
-		{
-			MaxVal = ASC->GetNumericAttribute(Max);
-		}
-		Json += TEXT(",\"max\":");
-		Json += FString::SanitizeFloat(MaxVal);
-	}
-	Json += TEXT("}");
-
-	BroadcastEvent(Entry.Channel, Json);
-}
-
-void UTSICWebUISubsystem::OnBridgedAttributeChanged(const FOnAttributeChangeData& /*ChangeData*/, FName Channel)
-{
-	FAttributeBridgeEntry* Entry = AttributeBridges.Find(Channel);
-	if (!Entry)
-	{
-		return;
-	}
-	BroadcastAttributeValue(*Entry);
-}
-
-void UTSICWebUISubsystem::BridgeAttribute(FName Channel, UAbilitySystemComponent* ASC,
-	const FGameplayAttribute& PrimaryAttribute, const FGameplayAttribute& OptionalMaxAttribute)
-{
-	if (!ASC || !PrimaryAttribute.IsValid())
-	{
-		return;
-	}
-
-	UnbridgeAttribute(Channel);
-
-	if (EventBus)
-	{
-		EventBus->RegisterChannel(Channel, EWebChannelKind::Sticky,
-			FString::Printf(TEXT("Live attribute: %s%s%s"),
-				*PrimaryAttribute.GetName(),
-				OptionalMaxAttribute.IsValid() ? TEXT(" / ") : TEXT(""),
-				OptionalMaxAttribute.IsValid() ? *OptionalMaxAttribute.GetName() : TEXT("")));
-	}
-
-	FAttributeBridgeEntry Entry;
-	Entry.ASC = ASC;
-	Entry.Channel = Channel;
-	Entry.PrimaryName = PrimaryAttribute.GetUProperty()->GetFName();
-	Entry.MaxName = OptionalMaxAttribute.IsValid() ? OptionalMaxAttribute.GetUProperty()->GetFName() : NAME_None;
-
-	const FName ChannelCopy = Channel;
-	Entry.PrimaryHandle = ASC->GetGameplayAttributeValueChangeDelegate(PrimaryAttribute)
-		.AddUObject(this, &UTSICWebUISubsystem::OnBridgedAttributeChanged, ChannelCopy);
-	if (OptionalMaxAttribute.IsValid())
-	{
-		Entry.MaxHandle = ASC->GetGameplayAttributeValueChangeDelegate(OptionalMaxAttribute)
-			.AddUObject(this, &UTSICWebUISubsystem::OnBridgedAttributeChanged, ChannelCopy);
-	}
-
-	AttributeBridges.Add(Channel, Entry);
-
-	// Push the current value immediately so sticky subscribers can populate.
-	BroadcastAttributeValue(Entry);
-
-	UE_LOG(LogTSICWebUI, Log, TEXT("AttributeBridge: %s -> %s%s"),
-		*Entry.PrimaryName.ToString(), *Channel.ToString(),
-		Entry.MaxName.IsNone() ? TEXT("") : *FString::Printf(TEXT(" + %s"), *Entry.MaxName.ToString()));
-}
-
-void UTSICWebUISubsystem::UnbridgeAttribute(FName Channel)
-{
-	FAttributeBridgeEntry* Entry = AttributeBridges.Find(Channel);
-	if (!Entry)
-	{
-		return;
-	}
-	if (UAbilitySystemComponent* ASC = Entry->ASC.Get())
-	{
-		if (Entry->PrimaryHandle.IsValid())
-		{
-			const FGameplayAttribute Primary = FGameplayAttribute(FindFProperty<FProperty>(ASC->GetClass(), Entry->PrimaryName));
-			if (Primary.IsValid())
-			{
-				ASC->GetGameplayAttributeValueChangeDelegate(Primary).Remove(Entry->PrimaryHandle);
-			}
-		}
-		if (Entry->MaxHandle.IsValid() && !Entry->MaxName.IsNone())
-		{
-			const FGameplayAttribute Max = FGameplayAttribute(FindFProperty<FProperty>(ASC->GetClass(), Entry->MaxName));
-			if (Max.IsValid())
-			{
-				ASC->GetGameplayAttributeValueChangeDelegate(Max).Remove(Entry->MaxHandle);
-			}
-		}
-	}
-	AttributeBridges.Remove(Channel);
 }
 
 FString UTSICWebUISubsystem::GetMessageBridgeDescriptionJson() const
@@ -1160,16 +1045,6 @@ void UTSICWebUISubsystem::DumpMessageBridgesToLog() const
 			*Info->Description);
 	}
 
-	UE_LOG(LogTSICWebUI, Display, TEXT("=== TSIC Web UI attribute bridges (%d) ==="), AttributeBridges.Num());
-	for (const TPair<FName, FAttributeBridgeEntry>& Pair : AttributeBridges)
-	{
-		const FAttributeBridgeEntry& E = Pair.Value;
-		UE_LOG(LogTSICWebUI, Display, TEXT("  %s = %s%s  asc=%s"),
-			*E.Channel.ToString(),
-			*E.PrimaryName.ToString(),
-			E.MaxName.IsNone() ? TEXT("") : *FString::Printf(TEXT(" / %s"), *E.MaxName.ToString()),
-			E.ASC.IsValid() ? *GetNameSafe(E.ASC->GetOwner()) : TEXT("(stale)"));
-	}
 }
 
 void UTSICWebUISubsystem::RegisterCoreChannels()
@@ -1234,7 +1109,7 @@ void UTSICWebUISubsystem::RegisterConsoleCommands()
 
 	DumpMessagesCmd = Mgr.RegisterConsoleCommand(
 		TEXT("WebUI.DumpMessages"),
-		TEXT("Print all bridged gameplay-message tags (and attribute bridges) to the log."),
+		TEXT("Print all bridged gameplay-message tags to the log."),
 		FConsoleCommandDelegate::CreateLambda([this]()
 		{
 			DumpMessageBridgesToLog();
@@ -1263,6 +1138,40 @@ void UTSICWebUISubsystem::RegisterConsoleCommands()
 			}
 			AsRenderer(RendererPtr)->PurgeMemory();
 			UE_LOG(LogTSICWebUI, Display, TEXT("WebUI.PurgeCache: WebCore memory cache purged."));
+		}),
+		ECVF_Default);
+
+	ReloadCmd = Mgr.RegisterConsoleCommand(
+		TEXT("WebUI.Reload"),
+		TEXT("Purge WebCore's in-memory cache and reload every mounted view's current URL. ")
+		TEXT("One-shot equivalent of WebUI.PurgeCache + WebUI.EvalJS <view> \"location.reload()\". ")
+		TEXT("Use after editing HTML/CSS/JS on disk to see the change without leaving PIE."),
+		FConsoleCommandDelegate::CreateLambda([this]()
+		{
+			if (!RendererPtr)
+			{
+				UE_LOG(LogTSICWebUI, Warning, TEXT("WebUI.Reload: renderer not initialised."));
+				return;
+			}
+			AsRenderer(RendererPtr)->PurgeMemory();
+			int32 ReloadedCount = 0;
+			for (auto& Pair : Views)
+			{
+				FTSICWebViewEntry& Entry = *Pair.Value;
+				if (!Entry.View.get())
+				{
+					continue;
+				}
+				ultralight::String Exception;
+				Entry.View->EvaluateScript(TSICWebUI::FStringToUL(TEXT("location.reload()")), &Exception);
+				if (!Exception.empty())
+				{
+					UE_LOG(LogTSICWebUI, Warning, TEXT("WebUI.Reload[%s]: reload script threw: %s"),
+						*Pair.Key.ToString(), *TSICWebUI::ULToFString(Exception));
+				}
+				++ReloadedCount;
+			}
+			UE_LOG(LogTSICWebUI, Display, TEXT("WebUI.Reload: purged cache + reloaded %d view(s)."), ReloadedCount);
 		}),
 		ECVF_Default);
 
@@ -1295,6 +1204,17 @@ void UTSICWebUISubsystem::RegisterConsoleCommands()
 				*Script,
 				*TSICWebUI::ULToFString(Result),
 				Exception.empty() ? TEXT("") : *FString::Printf(TEXT("  (exception: %s)"), *TSICWebUI::ULToFString(Exception)));
+		}),
+		ECVF_Default);
+
+	DebugCmd = Mgr.RegisterConsoleCommand(
+		TEXT("WebUI.Debug"),
+		TEXT("Open the WebUI debug visualiser (screens/webui-debug.html). Shows input state, ")
+		TEXT("channel activity, focus, gamepad, and message log in real time."),
+		FConsoleCommandDelegate::CreateLambda([this]()
+		{
+			LoadURL(TEXT("Root"), TEXT("file:///screens/webui-debug.html"));
+			UE_LOG(LogTSICWebUI, Display, TEXT("WebUI.Debug: opened debug visualiser."));
 		}),
 		ECVF_Default);
 }
@@ -1330,6 +1250,16 @@ void UTSICWebUISubsystem::UnregisterConsoleCommands()
 	{
 		IConsoleManager::Get().UnregisterConsoleObject(PurgeCacheCmd);
 		PurgeCacheCmd = nullptr;
+	}
+	if (ReloadCmd)
+	{
+		IConsoleManager::Get().UnregisterConsoleObject(ReloadCmd);
+		ReloadCmd = nullptr;
+	}
+	if (DebugCmd)
+	{
+		IConsoleManager::Get().UnregisterConsoleObject(DebugCmd);
+		DebugCmd = nullptr;
 	}
 }
 
